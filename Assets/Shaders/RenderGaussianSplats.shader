@@ -22,7 +22,7 @@ CGPROGRAM
 #include "UnityCG.cginc"
 #include "GaussianSplatting.hlsl"
 
-struct InputSplat
+struct InputSplat //单个高斯球数据结构
 {
     float3 pos;
     float3 nor;
@@ -35,7 +35,7 @@ struct InputSplat
 StructuredBuffer<InputSplat> _DataBuffer;
 StructuredBuffer<uint> _OrderBuffer;
 
-struct v2f
+struct v2f //顶点到片元的输入结构
 {
     half4 col : COLOR0;
     float2 centerScreenPos : TEXCOORD3;
@@ -43,14 +43,19 @@ struct v2f
     float4 vertex : SV_POSITION;
 };
 
-static const float SH_C0 = 0.2820948;
-static const float SH_C1 = 0.4886025;
+static const float SH_C0 = 0.2820948;//√(1/4π) 常数项
+static const float SH_C1[] = 
+{
+    -0.4886025,//√(3/4π) 一阶项，分别对应 y、z、x 三个基函数
+    +0.4886025,
+    -0.4886025
+};
 static const float SH_C2[] = {
-    +1.0925484,
+    +1.0925484,//√(15/16π) 二阶项，分别对应 xy、yz、(2zz-xx-yy)、xz、(xx-yy) 五个基函数
+	-1.0925484,//二阶项，分别对应 xy、yz、(2zz-xx-yy)、xz、(xx-yy) 五个基函数
+    +0.3153916,//√(5/16π) 二阶项
 	-1.0925484,
-    +0.3153916,
-	-1.0925484,
-	+0.5462742
+	+0.5462742 // 1/2 * √(15/16π) 
 };
 static const float SH_C3[] = {
 	-0.5900436,
@@ -72,7 +77,10 @@ half3 ShadeSH(InputSplat splat, float3 dir)
     // ambient band
     half3 res = SH_C0 * splat.sh0;
     // 1st degree
-    res += SH_C1 * (-splat.sh1 * y + splat.sh2 * z - splat.sh3 * x);
+    //res += SH_C1 * (-splat.sh1 * y + splat.sh2 * z - splat.sh3 * x);
+    res += SH_C1[0] * splat.sh1 * y +
+           SH_C1[1] * splat.sh2 * z +
+           SH_C1[2] * splat.sh3 * x;
     // 2nd degree
     float xx = x * x, yy = y * y, zz = z * z;
     float xy = x * y, yz = y * z, xz = x * z;
@@ -99,8 +107,8 @@ float _SplatScale;
 v2f vert (uint vtxID : SV_VertexID, uint instID : SV_InstanceID)
 {
     v2f o;
-    instID = _OrderBuffer[instID];
-    InputSplat splat = _DataBuffer[instID];
+    instID = _OrderBuffer[instID];//第 instID 个 splat 的实际索引，通过排序得到
+    InputSplat splat = _DataBuffer[instID];//从 StructuredBuffer 中读取 splat 数据
 
     float4 boxRot = normalize(splat.rot.yzwx); //@TODO: move normalize and swizzle offline
     float3 boxSize = exp(splat.scale); //@TODO: move exp offline

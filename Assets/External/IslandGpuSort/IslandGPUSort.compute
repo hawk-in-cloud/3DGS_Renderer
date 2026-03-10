@@ -1,26 +1,38 @@
-// This is adapted from Unity HDRP/SRP GPUSort code, which is over at:
+﻿// 本文件改编自 Unity HDRP/SRP 的 GPUSort 代码，来源：
 //   https://github.com/Unity-Technologies/Graphics/tree/8bdd620b16/Packages/com.unity.render-pipelines.high-definition/Runtime/Utilities/GPUSort
 //   https://github.com/Unity-Technologies/Graphics/tree/8bdd620b16/Packages/com.unity.render-pipelines.core/Runtime/Utilities/GPUSort
-// however that code itself seems to be adapted from Tim Gfrerer "Project Island":
+// 该实现本身又很可能改编自 Tim Gfrerer 的 "Project Island"：
 //   https://poniesandlight.co.uk/reflect/bitonic_merge_sort/
 //   https://github.com/tgfrerer/island
-// and that one is under MIT license, Copyright (c) 2020 Tim Gfrerer
+// Project Island 使用 MIT 许可证，Copyright (c) 2020 Tim Gfrerer。
 //
-// Adaptations done compared to HDRP code:
-// - removed bits that were integrating into SRP RenderGraph thingy,
-// - made buffer copy bit work with sizes larger than 4M.
-// - fixed it to work on Metal (and possibly some Vulkan impls) at small item counts.
+// 相比 HDRP 原实现，这里做了以下调整：
+// - 移除了与 SRP RenderGraph 集成相关的部分；
+// - 修复了当缓冲区超过 4M 时的拷贝处理；
+// - 修复了在 Metal（以及部分 Vulkan 实现）下小数据量场景的问题。
+//
+// 总览：
+// 1) 这是一个“按 key 对 (key,value) 键值对做降序排序”的 GPU Bitonic Merge Sort 实现。
+// 2) _KeyBuffer 保存排序依据，_ValueBuffer 保存对应 payload（本项目里是 splat 索引）。
+// 3) 排序时 key/value 必须同步交换，最终得到“排序后的索引顺序”。
+// 4) 算法分为局部阶段（groupshared 内）和全局阶段（RWByteAddressBuffer 上）。
 
 #pragma kernel Kernel
 
 #pragma use_dxc metal
 
 #pragma multi_compile _ STAGE_BMS STAGE_LOCAL_DISPERSE STAGE_BIG_FLIP STAGE_BIG_DISPERSE
+// 四个阶段由 C# 侧通过 keyword 切换并多次 Dispatch：
+// STAGE_BMS            -> 组内 bitonic merge 建序
+// STAGE_LOCAL_DISPERSE -> 组内细化分散比较
+// STAGE_BIG_FLIP       -> 跨组大跨度镜像比较
+// STAGE_BIG_DISPERSE   -> 跨组大跨度分散比较
 
 // Disable warning for auto unrolling of single iteration loop.
 #pragma warning(disable : 3557)
 
 #define LOCAL_SIZE 1024
+// 每个线程组 1024 线程，每线程处理 2 个元素 => 每组可处理 2048 个元素（局部阶段）。
 
 struct Semantics
 {
@@ -33,17 +45,19 @@ static Semantics s_Semantics;
 
 uint _H;
 uint _Total;
-
-
+// _H：当前 bitonic 子阶段的跨度（由 C# 侧不断更新）。
+// _Total：总元素数（通常是 2 的幂，且 >= 真实元素数）。
 
 // Global scratch space.
 RWByteAddressBuffer _KeyBuffer;
 RWByteAddressBuffer _ValueBuffer;
 //RWStructuredBuffer<uint> _DebugBuffer;
+// 使用 ByteAddressBuffer 是为了按字节地址 Load/Store，兼容性强、访问直接。
 
 // Local scratch space.
 groupshared uint gs_Keys   [LOCAL_SIZE * 2];
 groupshared uint gs_Values [LOCAL_SIZE * 2];
+// 组内共享内存缓存，局部阶段先从全局读入、比较交换后再写回。
 
 void GlobalCompareAndSwap(int2 i)
 {
@@ -53,6 +67,7 @@ void GlobalCompareAndSwap(int2 i)
     const uint val0 = _ValueBuffer.Load(i.x << 2);
     const uint val1 = _ValueBuffer.Load(i.y << 2);
 
+    // 降序规则：更大的 key 放在更小下标。
     if (key0 < key1)
     {
         _KeyBuffer.Store(i.x << 2, key1);
@@ -71,6 +86,7 @@ void LocalCompareAndSwap(uint2 i)
     const uint val0 = gs_Values[i.x];
     const uint val1 = gs_Values[i.y];
 
+    // 与全局版本同规则，但作用在 groupshared 中，吞吐更高。
     if (key0 < key1)
     {
         gs_Keys[i.x] = key1;
@@ -83,12 +99,15 @@ void LocalCompareAndSwap(uint2 i)
 
 void BigFlip(uint h)
 {
+    // h 太小时属于局部阶段，不在这里做。
     if (LOCAL_SIZE * 2 > h)
         return;
 
     uint t_p = s_Semantics.dispatchThreadID.x;
     uint half_h = h >> 1;
 
+    // 计算当前线程要比较的一对“镜像下标” (x,y)。
+    // q: 所在 h-块的起始位置；x/y 在块内对称分布。
     uint q = ((2 * t_p) / h) * h;
     uint x = q + (t_p % half_h);
     uint y = q + h - (t_p % half_h) - 1;
@@ -98,15 +117,18 @@ void BigFlip(uint h)
 
 void BigDisperse(uint h)
 {
+    // h 太小时属于局部阶段，不在这里做。
     if (LOCAL_SIZE * 2 > h)
         return;
 
     uint t_p = s_Semantics.dispatchThreadID.x;
     uint half_h = h >> 1;
 
+    // 计算当前线程要比较的一对“半区对应下标” (x,y)。
+    // 与 BigFlip 不同，这里是左右半区同偏移位置配对。
     uint q = ((2 * t_p) / h) * h;
-    uint x = q + (t_p % (half_h));
-    uint y = q + (t_p % (half_h)) + half_h;
+    uint x = q + (t_p % half_h);
+    uint y = q + (t_p % half_h) + half_h;
 
     GlobalCompareAndSwap(int2(x, y));
 }
@@ -114,41 +136,46 @@ void BigDisperse(uint h)
 void LocalFlip(uint h)
 {
     const uint t = s_Semantics.groupIndex;
+    // 组内所有线程同步，确保上一步写入对本步可见。
     GroupMemoryBarrierWithGroupSync();
 
     uint half_h = h >> 1;
 
-    uint q = h * ( ( 2 * t ) / h );
+    // 与 BigFlip 同构，但在组内共享内存索引空间做比较交换。
+    uint q = h * ((2 * t) / h);
     uint x = q + (t % half_h);
-    uint y = q + (h - 1 - ( t % half_h ));
+    uint y = q + (h - 1 - (t % half_h));
 
     LocalCompareAndSwap(uint2(x, y));
 }
 
-void LocalDisperse(uint h)
+void LocalDisperse(uint h) // h 是当前 bitonic 子阶段的跨度
 {
     const uint t = s_Semantics.groupIndex;
 
-    for ( ; h > 1 ; h /= 2 )
+    // 从当前 h 开始不断减半，直到 1，完成组内细化收敛。
+    for (; h > 1; h /= 2)
     {
         GroupMemoryBarrierWithGroupSync();
 
         uint half_h = h >> 1;
 
-        uint q = h * ( ( 2 * t ) / h );
+        uint q = h * ((2 * t) / h);
         uint x = q + (t % half_h);
-        uint y = q + (half_h + ( t % half_h ));
+        uint y = q + (half_h + (t % half_h));
 
+        // 同偏移配对，执行 compare-and-swap。
         LocalCompareAndSwap(uint2(x, y));
     }
 }
 
 void LocalBMS(uint h)
 {
-    for ( uint hh = 2; hh <= h; hh <<= 1 )
+    // 从长度 2 开始逐级扩张到 h：每级先 flip 再 disperse。
+    for (uint hh = 2; hh <= h; hh <<= 1)
     {
         LocalFlip(hh);
-        LocalDisperse( hh / 2 );
+        LocalDisperse(hh / 2);
     }
 }
 
@@ -161,40 +188,44 @@ void Kernel(Semantics s)
     const uint t = s_Semantics.groupIndex;
 
     uint offset = 2 * LOCAL_SIZE * s_Semantics.groupID.x;
+    // 每个组负责连续 2048 元素块，offset 为该块起始位置。
 
 #if defined(STAGE_BMS) || defined(STAGE_LOCAL_DISPERSE)
+    // 仅局部阶段需要先把全局数据搬到 groupshared。
     if (t * 2 + 1 < _Total)
     {
-        gs_Keys  [t * 2 + 0] = _KeyBuffer.Load   ((offset + t * 2 + 0) << 2);
-        gs_Keys  [t * 2 + 1] = _KeyBuffer.Load   ((offset + t * 2 + 1) << 2);
-        gs_Values[t * 2 + 0] = _ValueBuffer.Load ((offset + t * 2 + 0) << 2);
-        gs_Values[t * 2 + 1] = _ValueBuffer.Load ((offset + t * 2 + 1) << 2);
+        gs_Keys[t * 2 + 0] = _KeyBuffer.Load((offset + t * 2 + 0) << 2);
+        gs_Keys[t * 2 + 1] = _KeyBuffer.Load((offset + t * 2 + 1) << 2);
+        gs_Values[t * 2 + 0] = _ValueBuffer.Load((offset + t * 2 + 0) << 2);
+        gs_Values[t * 2 + 1] = _ValueBuffer.Load((offset + t * 2 + 1) << 2);
     }
     else
     {
-        gs_Keys  [t * 2 + 0] = 0;
-        gs_Keys  [t * 2 + 1] = 0;
+        gs_Keys[t * 2 + 0] = 0;
+        gs_Keys[t * 2 + 1] = 0;
         gs_Values[t * 2 + 0] = 0;
         gs_Values[t * 2 + 1] = 0;
     }
 #endif
 
+    // 同一个 Kernel，根据 keyword 执行不同排序子阶段。
 #ifdef STAGE_BMS
     LocalBMS(_H);
-#elif  STAGE_LOCAL_DISPERSE
+#elif STAGE_LOCAL_DISPERSE
     LocalDisperse(_H);
-#elif  STAGE_BIG_FLIP
+#elif STAGE_BIG_FLIP
     BigFlip(_H);
-#elif  STAGE_BIG_DISPERSE
+#elif STAGE_BIG_DISPERSE
     BigDisperse(_H);
 #endif
 
 #if defined(STAGE_BMS) || defined(STAGE_LOCAL_DISPERSE)
     GroupMemoryBarrierWithGroupSync();
+    // 局部阶段结束后，把 groupshared 结果写回全局 buffer。
     if (t * 2 + 1 < _Total)
     {
-        _KeyBuffer.Store  ((offset + t * 2 + 0) << 2, gs_Keys  [t * 2 + 0]);
-        _KeyBuffer.Store  ((offset + t * 2 + 1) << 2, gs_Keys  [t * 2 + 1]);
+        _KeyBuffer.Store((offset + t * 2 + 0) << 2, gs_Keys[t * 2 + 0]);
+        _KeyBuffer.Store((offset + t * 2 + 1) << 2, gs_Keys[t * 2 + 1]);
         _ValueBuffer.Store((offset + t * 2 + 0) << 2, gs_Values[t * 2 + 0]);
         _ValueBuffer.Store((offset + t * 2 + 1) << 2, gs_Values[t * 2 + 1]);
     }

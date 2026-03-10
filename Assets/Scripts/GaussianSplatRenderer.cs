@@ -11,8 +11,9 @@ using UnityEngine.Rendering;
 [BurstCompile]
 public class GaussianSplatRenderer : MonoBehaviour
 {
-    const string kPointCloudPly = "point_cloud/iteration_7000/point_cloud.ply";
-    const string kPointCloud30kPly = "point_cloud/iteration_30000/point_cloud.ply";
+    // v0.1.0 的路径约定：点云数据固定在 Assets/point_cloud/... 下。
+    const string kPointCloudPly = "Assets/point_cloud/iteration_7000/point_cloud.ply";
+    const string kPointCloud30kPly = "Assets/point_cloud/iteration_30000/point_cloud.ply";
     const string kCamerasJson = "cameras.json";
 
     [FolderPicker(kPointCloudPly)]
@@ -25,23 +26,24 @@ public class GaussianSplatRenderer : MonoBehaviour
     public ComputeShader m_CSSplatUtilities;
     public ComputeShader m_CSGpuSort;
 
-    // input file splat data is expected to be in this format
-    public struct InputSplat
+    // 输入 PLY 的单点结构。字段布局必须和文件内 vertex 属性完全一致。
+    public struct InputSplat //每个高斯点的完整属性
     {
-        public Vector3 pos;
-        public Vector3 nor;
-        public Vector3 dc0;
-        public Vector3 sh0, sh1, sh2, sh3, sh4, sh5, sh6, sh7, sh8, sh9, sh10, sh11, sh12, sh13, sh14;
-        public float opacity;
-        public Vector3 scale;
-        public Quaternion rot;
+        public Vector3 pos;//椭球的中心位置xyz
+        public Vector3 nor;//旋转角度即法线
+        public Vector3 dc0;//基础颜色
+        public Vector3 sh0, sh1, sh2, sh3, sh4, sh5, 
+        sh6, sh7, sh8, sh9, sh10, sh11, sh12, sh13, sh14;//SH
+        public float opacity;//透明度
+        public Vector3 scale;//放缩大小
+        public Quaternion rot;//旋转角（4维）
     }
 
-    public struct CameraData
+    public struct CameraData//camera.json得到的相机位姿
     {
-        public Vector3 pos;
+        public Vector3 pos; 
         public Vector3 axisX, axisY, axisZ;
-        public float fov;
+        public float fov;//俯仰角
     }
 
     int m_SplatCount;
@@ -67,9 +69,11 @@ public class GaussianSplatRenderer : MonoBehaviour
     public static unsafe NativeArray<InputSplat> LoadPLYSplatFile(string folder, bool use30k)
     {
         NativeArray<InputSplat> data = default;
+        // 实际拼出来的路径是：{m_PointCloudFolder}/Assets/point_cloud/...
         string plyPath = $"{folder}/{(use30k ? kPointCloud30kPly : kPointCloudPly)}";
         if (!File.Exists(plyPath))
         {
+            // 30k 缺失时回退到 7000 版本。
             plyPath = $"{folder}/{kPointCloudPly}";
             if (!File.Exists(plyPath))
                 return data;
@@ -80,7 +84,7 @@ public class GaussianSplatRenderer : MonoBehaviour
         if (UnsafeUtility.SizeOf<InputSplat>() != vertexStride)
             throw new Exception($"InputVertex size mismatch, we expect {UnsafeUtility.SizeOf<InputSplat>()} file has {vertexStride}");
 
-        // reorder SHs
+        // PLY 中 SH 系数是按通道分块存储；渲染侧期望每个 SH 的 RGB 连续，这里重排一次。
         NativeArray<float> floatData = verticesRawData.Reinterpret<float>(1);
         ReorderSHs(splatCount, (float*)floatData.GetUnsafePtr());
 
@@ -115,6 +119,7 @@ public class GaussianSplatRenderer : MonoBehaviour
 
     static CameraData[] LoadJsonCamerasFile(string folder)
     {
+        // cameras.json 放在 m_PointCloudFolder 指向目录的根下。
         string path = $"{folder}/{kCamerasJson}";
         if (!File.Exists(path))
             return null;
@@ -129,7 +134,7 @@ public class GaussianSplatRenderer : MonoBehaviour
         {
             var jsonCam = jsonCameras[camIndex];
             var pos = new Vector3(jsonCam.position[0], jsonCam.position[1], jsonCam.position[2]);
-            // the matrix is a "view matrix", not "camera matrix" lol
+            // 输入矩阵是“视图矩阵”坐标约定，下面会做到 Unity 空间的轴变换。
             var axisx = new Vector3(jsonCam.rotation[0][0], jsonCam.rotation[1][0], jsonCam.rotation[2][0]);
             var axisy = new Vector3(jsonCam.rotation[0][1], jsonCam.rotation[1][1], jsonCam.rotation[2][1]);
             var axisz = new Vector3(jsonCam.rotation[0][2], jsonCam.rotation[1][2], jsonCam.rotation[2][2]);
@@ -156,6 +161,7 @@ public class GaussianSplatRenderer : MonoBehaviour
 
     public void OnEnable()
     {
+        // 绑定到相机预剔除事件；每个相机会在这里触发排序+绘制。
         Camera.onPreCull += OnPreCullCamera;
 
         m_Cameras = null;
@@ -198,7 +204,7 @@ public class GaussianSplatRenderer : MonoBehaviour
         m_GpuSortDistances = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCountNextPot, 4);
         m_GpuSortKeys = new GraphicsBuffer(GraphicsBuffer.Target.Structured, splatCountNextPot, 4);
 
-        // init keys buffer to splat indices
+        // 初始化排序 key：默认写入 [0..N) 的点索引。
         m_CSSplatUtilities.SetBuffer(0, "_SplatSortKeys", m_GpuSortKeys);
         m_CSSplatUtilities.SetInt("_SplatCountPOT", m_GpuSortDistances.count);
         m_CSSplatUtilities.GetKernelThreadGroupSizes(0, out uint gsX, out uint gsY, out uint gsZ);
@@ -218,6 +224,7 @@ public class GaussianSplatRenderer : MonoBehaviour
         if (m_GpuData == null)
             return;
 
+        // 每个相机每帧：先按相机深度排序，再一次性 procedural draw 所有 splat。
         SortPoints(cam);
         Graphics.DrawProcedural(m_Material, m_Bounds, MeshTopology.Triangles, 6, m_SplatCount, cam);
     }
@@ -225,6 +232,7 @@ public class GaussianSplatRenderer : MonoBehaviour
     public void OnDisable()
     {
         Camera.onPreCull -= OnPreCullCamera;
+        // m_SplatData 是 NativeArray，必须手动释放。
         m_SplatData.Dispose();
         m_GpuData?.Dispose();
         m_GpuPositions?.Dispose();
@@ -234,7 +242,7 @@ public class GaussianSplatRenderer : MonoBehaviour
 
     void SortPoints(Camera cam)
     {
-        // calculate distance to the camera for each splat
+        // 1) 计算每个 splat 到当前相机的深度 key（compute）。
         m_CSSplatUtilities.SetBuffer(1, "_InputPositions", m_GpuPositions);
         m_CSSplatUtilities.SetBuffer(1, "_SplatSortDistances", m_GpuSortDistances);
         m_CSSplatUtilities.SetBuffer(1, "_SplatSortKeys", m_GpuSortKeys);
@@ -244,7 +252,7 @@ public class GaussianSplatRenderer : MonoBehaviour
         m_CSSplatUtilities.GetKernelThreadGroupSizes(1, out uint gsX, out uint gsY, out uint gsZ);
         m_CSSplatUtilities.Dispatch(1, (m_GpuSortDistances.count + (int)gsX - 1)/(int)gsX, 1, 1);
 
-        // sort the splats
+        // 2) 基于 bitonic merge 的 GPU 排序，得到从近到远或远到近的索引序列。
         CommandBuffer cmd = new CommandBuffer {name = "GPUSort"};
         m_Sorter.Dispatch(cmd, m_SorterArgs);
         Graphics.ExecuteCommandBuffer(cmd);

@@ -11,6 +11,7 @@ using UnityEngine.Experimental.Rendering;
 [BurstCompile]
 public class GaussianSplatRendererEditor : Editor
 {
+    // 统计图每行高度（按输入字段逐行绘制）。
     const int kRowHeight = 12;
     static string[] kFieldNames = {
         "px", "py", "pz", // 0
@@ -58,6 +59,7 @@ public class GaussianSplatRendererEditor : Editor
         var cameras = gs.cameras;
         if (cameras != null && cameras.Length != 0)
         {
+            // 若读到了 cameras.json，就提供相机索引滑条，快速跳转到训练相机位姿。
             var camIndex = EditorGUILayout.IntSlider("Camera", m_CameraIndex, 0, cameras.Length - 1);
             camIndex = math.clamp(camIndex, 0, cameras.Length - 1);
             if (camIndex != m_CameraIndex)
@@ -84,6 +86,7 @@ public class GaussianSplatRendererEditor : Editor
         }
 
         GUILayout.BeginHorizontal();
+        // 调试入口：统计每个字段的取值范围与分布。
         if (GUILayout.Button("Calc Stats"))
             CalcStats(gs.pointCloudFolder, gs.m_Use30kVersion);
         if (GUILayout.Button("Clear Stats", GUILayout.ExpandWidth(false)))
@@ -143,7 +146,7 @@ public class GaussianSplatRendererEditor : Editor
 
         public void Execute(int fieldIndex)
         {
-            // find min/max
+            // 第一步：扫描该字段的最小/最大值。
             Vector2 range = new Vector2(float.PositiveInfinity, float.NegativeInfinity);
             int idx = fieldIndex;
             for (int si = 0; si < itemCount; ++si)
@@ -155,7 +158,7 @@ public class GaussianSplatRendererEditor : Editor
             }
             ranges[fieldIndex] = range;
 
-            // fill texture with value distribution over the range
+            // 第二步：把归一化后的值写到统计图纹理上，形成分布可视化。
             idx = fieldIndex;
             for (int si = 0; si < itemCount; ++si)
             {

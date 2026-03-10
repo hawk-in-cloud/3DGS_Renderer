@@ -14,6 +14,7 @@ public class FolderPickerPropertyDrawer : PropertyDrawer
 
     static bool CheckPath(string path, string hasToContainFile)
     {
+        // 统一做目录合法性和“必须包含某文件”的校验。
         if (string.IsNullOrWhiteSpace(path))
             return false;
         if (!Directory.Exists(path))
@@ -35,6 +36,7 @@ public class FolderPickerPropertyDrawer : PropertyDrawer
 
     static string PathAbsToStorage(string path)
     {
+        // 绝对路径尽量转换成相对项目根目录的存储路径，便于跨机器复现。
         path = path.Replace('\\', '/');
         var dataPath = Application.dataPath;
         if (path.StartsWith(dataPath, StringComparison.Ordinal))
@@ -78,6 +80,7 @@ public class FolderPickerPropertyDrawer : PropertyDrawer
                 {
                     if (iconRect.Contains(evt.mousePosition))
                     {
+                        // 点击小文件夹图标：打开系统目录选择器。
                         if (string.IsNullOrWhiteSpace(value))
                             value = EditorPrefs.GetString(kLastPathPref);
                         string openToPath = string.Empty;
@@ -95,6 +98,7 @@ public class FolderPickerPropertyDrawer : PropertyDrawer
                     }
                     else if (Directory.Exists(value))
                     {
+                        // 点击文本区域：在系统资源管理器里定位到当前目录。
                         EditorUtility.RevealInFinder(value);
                     }
                     GUIUtility.keyboardControl = controlId;
@@ -102,6 +106,7 @@ public class FolderPickerPropertyDrawer : PropertyDrawer
                 break;
             case EventType.DragUpdated:
             case EventType.DragPerform:
+                // 支持把目录拖到该字段上。
                 if (dropPosition.Contains(evt.mousePosition) && GUI.enabled)
                 {
                     if (DragAndDrop.paths.Length > 0)
