@@ -1,0 +1,47 @@
+#define GROUP_SIZE 1024 //每个线程组的线程数量。必须与 C# 代码中 Dispatch 调用的线程组数量相匹配。
+
+#pragma kernel CSSetIndices
+#pragma kernel CSCalcDistances
+
+StructuredBuffer<float3> _InputPositions;//每个 splat 的位置
+float4x4 _WorldToCameraMatrix;//世界到相机的变换矩阵
+RWStructuredBuffer<uint> _SplatSortDistances;//用于排序的距离
+RWStructuredBuffer<uint> _SplatSortKeys;//用于排序的键
+uint _SplatCount;//splats 的数量
+uint _SplatCountPOT;//下一个 2 的幂次方的 splats 数量
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSSetIndices (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCountPOT)//防止当_SplatCount<=512时，线程数量超过_SplatCount的情况。
+        return;
+
+    _SplatSortKeys[idx] = idx;
+}
+
+
+[numthreads(GROUP_SIZE,1,1)]
+void CSCalcDistances (uint3 id : SV_DispatchThreadID)
+{
+    uint idx = id.x;
+    if (idx >= _SplatCountPOT)
+        return;
+
+    if (idx >= _SplatCount)
+    {
+        // fill pad-to-next-POT portion with dummy data that will never get sorted into regular data place
+        //填充到下一个 2 的幂次方的部分，使用永远不会被排序到常规数据位置的虚拟数据。
+        _SplatSortDistances[idx] = 0;
+        return;
+    }
+
+    uint origIdx = _SplatSortKeys[idx];
+
+    float3 pos = mul(_WorldToCameraMatrix, float4(_InputPositions[origIdx] * float3(1,1,-1), 1)).xyz;
+    // make distance radix sort friendly from http://stereopsis.com/radix.html
+    // 从 http://stereopsis.com/radix.html 使距离适合基数排序
+    uint fu = asuint(pos.z);
+    uint mask = -((int)(fu >> 31)) | 0x80000000;
+    _SplatSortDistances[idx] = fu ^ mask;
+}

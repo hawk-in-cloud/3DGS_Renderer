@@ -1,0 +1,47 @@
+# Unity generated folders
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# IDE / editor files
+.vs/
+.vscode/
+.idea/
+*.csproj
+*.sln
+*.slnx
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+
+# Build outputs
+[Bb]uild/
+[Bb]uilds/
+*.apk
+*.aab
+*.unitypackage
+*.app
+*.exe
+
+# Tooling caches
+.dotnet/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Keep the actual project content
+!Assets/
+!Packages/
+!ProjectSettings/
+!Tools/
+!docs/
+!*.md
+!.gitignore
