@@ -45,3 +45,6 @@ desktop.ini
 !docs/
 !*.md
 !.gitignore
+
+# Do not track generated benchmark outputs
+Assets/Calculation/

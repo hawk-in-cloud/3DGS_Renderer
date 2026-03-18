@@ -1,5 +1,8 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
+using System.IO;
+using TinyJson;
 using Unity.Profiling;
 using UnityEngine;
 
@@ -37,6 +40,17 @@ public class GaussianBenchmarkRunner : MonoBehaviour
     [Min(16)] public int captureWidth = 640;
     [Min(16)] public int captureHeight = 360;
 
+    [Header("Batch Capture (cameras.json)")]
+    public bool showBatchCaptureButton = true;
+    public string camerasJsonPath = "Assets/Resources/cameras.json";
+    public bool useCameraJsonResolution = true;
+    public bool applyFovFromJson = false;
+    public string batchOutputFolder = "Assets/Calculation/lego/Unity";
+    public bool overwriteExisting = true;
+    public bool useSequentialNames = true;
+    [Min(3)] public int nameDigits = 5;
+    public string namePrefix = "";
+
     [Header("Overlay UI")]
     public Vector2 overlayAnchor = new Vector2(20, 20);
     [Range(300, 1200)] public int overlayWidth = 640;
@@ -65,6 +79,9 @@ public class GaussianBenchmarkRunner : MonoBehaviour
 
     bool m_QualityBusy;
     float m_NextQualityUpdateTime;
+    bool m_BatchCaptureBusy;
+    int m_BatchCaptureIndex;
+    int m_BatchCaptureTotal;
 
     int m_CaptureWidth = -1;
     int m_CaptureHeight = -1;
@@ -115,6 +132,13 @@ public class GaussianBenchmarkRunner : MonoBehaviour
     {
         ReleaseCaptureBuffers();
         DisposeGpuRecorder();
+    }
+
+    [ContextMenu("Capture All From Cameras.json")]
+    public void CaptureAllFromCamerasJson()
+    {
+        if (!m_BatchCaptureBusy)
+            StartCoroutine(CaptureAllFromCamerasJsonCoroutine());
     }
 
     void Update()
@@ -400,6 +424,87 @@ public class GaussianBenchmarkRunner : MonoBehaviour
         m_QualityBusy = false;
     }
 
+    IEnumerator CaptureAllFromCamerasJsonCoroutine()
+    {
+        m_BatchCaptureBusy = true;
+        m_BatchCaptureIndex = 0;
+        m_BatchCaptureTotal = 0;
+        int savedCount = 0;
+
+        if (targetCamera == null && autoUseMainCamera)
+            targetCamera = Camera.main;
+        if (targetCamera == null)
+        {
+            Debug.LogWarning("GaussianBenchmarkRunner: targetCamera is null.");
+            m_BatchCaptureBusy = false;
+            yield break;
+        }
+
+        string jsonPath = ResolveCamerasJsonPath();
+        if (string.IsNullOrEmpty(jsonPath))
+        {
+            Debug.LogWarning("GaussianBenchmarkRunner: cameras.json not found.");
+            m_BatchCaptureBusy = false;
+            yield break;
+        }
+
+        List<JsonCamera> jsonCameras;
+        try
+        {
+            string json = File.ReadAllText(jsonPath);
+            jsonCameras = JSONParser.FromJson<List<JsonCamera>>(json);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning($"GaussianBenchmarkRunner: failed to read cameras.json: {e.Message}");
+            m_BatchCaptureBusy = false;
+            yield break;
+        }
+
+        if (jsonCameras == null || jsonCameras.Count == 0)
+        {
+            Debug.LogWarning("GaussianBenchmarkRunner: cameras.json is empty.");
+            m_BatchCaptureBusy = false;
+            yield break;
+        }
+
+        string outDir = ResolveOutputFolder(batchOutputFolder);
+        if (!Directory.Exists(outDir))
+            Directory.CreateDirectory(outDir);
+
+        m_BatchCaptureTotal = jsonCameras.Count;
+        for (int i = 0; i < jsonCameras.Count; i++)
+        {
+            m_BatchCaptureIndex = i + 1;
+            var cam = jsonCameras[i];
+            ApplyCameraJsonToUnity(targetCamera, cam);
+
+            int w = captureWidth;
+            int h = captureHeight;
+            if (useCameraJsonResolution && cam.width > 0 && cam.height > 0)
+            {
+                w = cam.width;
+                h = cam.height;
+            }
+
+            EnsureCaptureBuffers(w, h);
+            yield return new WaitForEndOfFrame();
+            CaptureFromCamera(targetCamera, m_CaptureRt, m_CurrentCapture);
+
+            string name = BuildOutputName(i, cam);
+            string outPath = Path.Combine(outDir, $"{name}.png");
+            if (overwriteExisting || !File.Exists(outPath))
+            {
+                byte[] bytes = m_CurrentCapture.EncodeToPNG();
+                File.WriteAllBytes(outPath, bytes);
+                savedCount++;
+            }
+        }
+
+        m_BatchCaptureBusy = false;
+        Debug.Log($"GaussianBenchmarkRunner: batch capture done. {m_BatchCaptureTotal} listed, {savedCount} saved -> {outDir}");
+    }
+
     void ResolveCaptureSize(out int width, out int height)
     {
         if (useReferenceResolution && referenceImage != null)
@@ -635,6 +740,72 @@ public class GaussianBenchmarkRunner : MonoBehaviour
         return 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
     }
 
+    string ResolveCamerasJsonPath()
+    {
+        if (!string.IsNullOrWhiteSpace(camerasJsonPath) && File.Exists(camerasJsonPath))
+            return camerasJsonPath;
+        if (File.Exists(Path.Combine(Application.dataPath, "Resources/cameras.json")))
+            return Path.Combine(Application.dataPath, "Resources/cameras.json");
+        if (File.Exists(Path.Combine(Application.dataPath, "cameras.json")))
+            return Path.Combine(Application.dataPath, "cameras.json");
+        return null;
+    }
+
+    static string ResolveOutputFolder(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return Path.Combine(Application.dataPath, "Calculation/Unity");
+        if (Path.IsPathRooted(path))
+            return path;
+        string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+        return Path.GetFullPath(Path.Combine(projectRoot, path));
+    }
+
+    static string SanitizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return "image";
+        foreach (var c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return Path.GetFileNameWithoutExtension(name);
+    }
+
+    string BuildOutputName(int index, JsonCamera cam)
+    {
+        if (useSequentialNames)
+        {
+            string digits = new string('0', Mathf.Max(3, nameDigits));
+            return $"{namePrefix}{index.ToString(digits)}";
+        }
+
+        string baseName = SanitizeFileName(string.IsNullOrWhiteSpace(cam.img_name) ? index.ToString() : cam.img_name);
+        // Include index to avoid collisions when img_name repeats.
+        return $"{baseName}_{index.ToString("D4")}";
+    }
+
+    void ApplyCameraJsonToUnity(Camera cam, JsonCamera json)
+    {
+        var pos = new Vector3(json.position[0], json.position[1], json.position[2]);
+        var axisx = new Vector3(json.rotation[0][0], json.rotation[1][0], json.rotation[2][0]);
+        var axisy = new Vector3(json.rotation[0][1], json.rotation[1][1], json.rotation[2][1]);
+        var axisz = new Vector3(json.rotation[0][2], json.rotation[1][2], json.rotation[2][2]);
+
+        pos.z *= -1;
+        axisy *= -1;
+        axisx.z *= -1;
+        axisy.z *= -1;
+        axisz.z *= -1;
+
+        cam.transform.position = pos;
+        cam.transform.LookAt(pos + axisz, axisy);
+
+        if (applyFovFromJson && json.fx > 0 && json.width > 0)
+        {
+            float fov = 2f * Mathf.Atan(0.5f * json.width / json.fx) * Mathf.Rad2Deg;
+            cam.fieldOfView = fov;
+        }
+    }
+
     void OnGUI()
     {
         if (!showOverlay)
@@ -661,7 +832,8 @@ public class GaussianBenchmarkRunner : MonoBehaviour
         int cpuGpuRows = 0;
         if (showCpuGpuFrameTime)
             cpuGpuRows = m_GpuUnavailableFrameCount > 30 ? 3 : 2;
-        int infoRows = 2 + cpuGpuRows + 5; // fps/frame + cpu/gpu + size/psnr/ssim/status + hint
+        int extraRows = showBatchCaptureButton ? 1 : 0;
+        int infoRows = 2 + cpuGpuRows + 5 + extraRows; // fps/frame + cpu/gpu + size/psnr/ssim/status + hint + actions
         float titleBlock = 28.0f;
         float rowHeight = 22.0f;
         float textBlockHeight = 10.0f + titleBlock + infoRows * rowHeight + overlayExtraTextHeight;
@@ -712,6 +884,20 @@ public class GaussianBenchmarkRunner : MonoBehaviour
 
         GUI.Label(new Rect(tx, ty, width - 24, 22), $"Quality Status: {m_QualityStatus}", m_LabelStyle);
         ty += 22;
+
+        if (showBatchCaptureButton)
+        {
+            if (!m_BatchCaptureBusy)
+            {
+                if (GUI.Button(new Rect(tx, ty, 240, 22), "Capture All From cameras.json"))
+                    CaptureAllFromCamerasJson();
+            }
+            else
+            {
+                GUI.Label(new Rect(tx, ty, width - 24, 22), $"Batch capture: {m_BatchCaptureIndex}/{m_BatchCaptureTotal}", m_LabelStyle);
+            }
+            ty += 22;
+        }
 
         GUI.Label(new Rect(tx, ty, width - 24, 22), "F9: Show/Hide Overlay", m_LabelStyle);
 
@@ -782,5 +968,18 @@ public class GaussianBenchmarkRunner : MonoBehaviour
     static string FormatMetric(float v)
     {
         return float.IsNaN(v) ? "N/A" : v.ToString("F2");
+    }
+
+    [Serializable]
+    class JsonCamera
+    {
+        public int id;
+        public string img_name;
+        public int width;
+        public int height;
+        public float[] position;
+        public float[][] rotation;
+        public float fx;
+        public float fy;
     }
 }
