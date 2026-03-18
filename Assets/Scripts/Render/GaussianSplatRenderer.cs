@@ -12,8 +12,8 @@ using UnityEngine.Rendering;
 public class GaussianSplatRenderer : MonoBehaviour
 {
     // v0.1.0 的路径约定：点云数据固定在 Assets/point_cloud/... 下。
-    const string kPointCloudPly = "Assets/Resources/point_cloud1/iteration_7000/point_cloud.ply";
-    const string kPointCloud30kPly = "Assets/Resources/point_cloud1/iteration_30000/point_cloud.ply";
+    const string kPointCloudPly = "Assets/Resources/point_cloud/iteration_7000/point_cloud.ply";
+    const string kPointCloud30kPly = "Assets/Resources/point_cloud/iteration_30000/point_cloud.ply";
     const string kCamerasJson = "cameras.json";
     const string kCamerasJsonInAssets = "Assets/Resources/cameras.json";
 
@@ -28,7 +28,7 @@ public class GaussianSplatRenderer : MonoBehaviour
     public ComputeShader m_CSGpuSort;
 
     // 输入 PLY 的单点结构。字段布局必须和文件内 vertex 属性完全一致。
-    public struct InputSplat //每个高斯点的完整属性
+    public struct InputSplat //每个高斯球的属性
     {
         public Vector3 pos;//椭球的中心位置xyz
         public Vector3 nor;//旋转角度即法线
